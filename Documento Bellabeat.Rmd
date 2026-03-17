@@ -1,0 +1,1128 @@
+---
+title: "Análisis de Patrones de Actividad Física en Usuarias de Wearables"
+subtitle: "Insights para la Optimización del Producto de Bellabeat"
+author: "Nadina Díaz"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+
+params:
+  ruta: "./data"
+
+output:
+  html_document:
+    theme: cosmo
+    highlight: tango
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center"
+)
+```
+
+## 1.Introducción
+
+**Bellabeat** es una empresa dedicada al desarrollo de productos tecnológicos orientados al **bienestar femenino.** Su ecosistema incluye dispositivos wearables, aplicaciones móviles y herramientas digitales que permiten monitorear actividad física, sueño, estrés y hábitos diarios.
+
+En un mercado cada vez más competitivo dentro del sector health-tech, la empresa busca fortalecer su estrategia de crecimiento mediante decisiones basadas en datos.
+
+Con este objetivo, se analizaron datos públicos de uso de dispositivos Fitbit para comprender patrones de comportamiento de las usuarias e identificar oportunidades para optimizar funcionalidades del producto y orientar **estrategias de marketing basadas en evidencia.**
+
+>Pregunta de Negocio: ¿Qué patrones de actividad física presentan las usuarias de dispositivos Fitbit y qué oportunidades estratégicas puede aprovechar Bellabeat para mejorar el engagement y la adopción de hábitos saludables?
+
+## 2.Fuentes de Datos Utilizadas
+
+Los datos provienen del dataset público Fitbit Fitness Tracker Data (disponible en Kaggle), que contiene el seguimiento de la actividad personal de usuarios de Fitbit.
+
+**Muestra:** Datos recolectados de 35 usuarios voluntarios que consintieron el envío de sus datos personales de seguimiento de actividad.
+
+**Contenido:** Registros de actividad física, pasos, calorías, frecuencia cardíaca y monitoreo del sueño.
+
+**Variables Principales analizadas:** 
+
+* Pasos diarios y distancia recorrida 
+* calorías quemadas.
+* Minutos de actividad  física (ligera, moderada e intensa).
+* Registros de sueño.
+
+**Limitaciones Identificadas:**
+
+* **Tamaño de la muestra:** Al contar con solo 35 usuarios, los resultados representan tendencias que deben ser validadas con grupos más amplios.
+
+* **Sesgo de datos:** El dataset no especifica género, aunque para este estudio se asume que los patrones de actividad observados pueden servir como aproximación al público objetivo de Bellabeat.
+
+* **Integridad:** Algunos usuarios presentan períodos de registro incompletos o días sin datos de uso del dispositivo.
+
+## 3.Preparación de los Datos (Setting up)
+### 3.1.Configuración del entorno
+Cargamos las librerías necesarias para la manipulación, limpieza y visualización de datos.
+
+```{r }
+
+library(tidyverse)
+library(lubridate)
+library(knitr)
+library(kableExtra)
+
+```
+
+```{r include=FALSE}
+
+# Listamos los archivos CSV en la ruta parametrizada
+archivos_fit <- list.files(
+  path = params$ruta,
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+```
+
+### 3.2.Consolidación de Datasets 
+Para optimizar el análisis, se integraron los múltiples archivos CSV en un único set de datos (data frame).
+
+```{r}
+# # Unimos todos los CSV en un único dataframe
+# y estandarizamos el formato de fecha
+
+tabla_mayor <- archivos_fit %>%
+  map_dfr(~ read_csv(.x, show_col_types = FALSE)) %>%
+  mutate(ActivityDate = mdy(ActivityDate))
+```
+
+### 3.3.Tratamiento de Duplicados y Agregación
+
+Durante la exploración inicial, se detectaron registros múltiples para un mismo usuario en la misma fecha (específicamente el 12 de abril).
+
+**Acción tomada:** En lugar de eliminar filas, se optó por una agregación por Id y Fecha. Esto permite consolidar todas las métricas registradas en un solo valor diario por usuario, garantizando la integridad de la información.
+
+```{r}
+#La agregación se realizó sumando las variables numéricas, asumiendo que los registros corresponden a fragmentos de actividad dentro del mismo día.
+
+tabla_unificada <- tabla_mayor %>%
+  group_by(Id, ActivityDate) %>%
+  summarise(across(where(is.numeric), ~ sum(.x, na.rm = TRUE)), .groups = "drop")
+
+# Verificamos la estructura final
+head(tabla_unificada) %>%
+  kbl() %>%
+  kable_classic(full_width = FALSE)
+```
+
+## 4.Limpieza Inicial y Procesamiento de Registros
+
+### 4.1. Filtrado de Usuarios por Consistencia
+
+Para garantizar que los hallazgos representen comportamientos habituales y no eventos aislados, seleccionamos únicamente a los usuarios con un mínimo de 20 días de **registros válidos.**
+
+```{r}
+
+#Este criterio permite reducir el ruido generado por usuarios con pocos registros, mejorando la representatividad de los patrones observados.
+
+usuarios_validos <- tabla_unificada %>%
+  count(Id, name = "dias_registrados") %>%
+  filter(dias_registrados >= 20) %>%
+  pull(Id)
+
+# La siguiente tabla muestra la cantidad de días registrados por cada usuario antes del filtrado.
+
+tabla_unificada %>%
+  count(Id, name = "dias_registrados") %>%
+  arrange(dias_registrados)%>%
+  kbl(caption = "Días registrados por ID de usuario") %>%
+  kable_minimal()
+
+```
+
+### 4.2. Refinamiento de Criterios y Creación de Métricas
+
+En esta etapa, aplicamos filtros de calidad y generamos nuevas variables para profundizar en el análisis:
+
+* **Filtro de actividad real:** Se eliminaron registros con menos de 100 pasos diarios, asumiendo que el dispositivo no se utilizó o hubo fallas de sincronización.
+
+* **Depuración de variables:** Eliminamos columnas con valores constantes a cero (LoggedActivitiesDistance, SedentaryActiveDistance, TrackerDistance), ya que no aportan variabilidad al análisis.
+
+* **Ingeniería de variables:** Creamos métricas de eficiencia como total_active_minutes, calorías por paso y etiquetas temporales (weekday, is_weekend) para identificar patrones semanales.
+
+
+```{r}
+tabla_filtrada <- tabla_unificada %>%
+  
+  # Eliminar columnas no útiles
+  select(-c(LoggedActivitiesDistance,
+            TrackerDistance,
+            SedentaryActiveDistance)) %>%
+  
+  # Este umbral permite excluir días en los que el dispositivo probablemente no fue utilizado.
+  filter(Id %in% usuarios_validos,
+         TotalSteps >= 100) %>%
+  
+  # Crear columnas derivadas
+  mutate(
+    date = as_date(ActivityDate),
+    weekday = wday(date, label = TRUE, week_start = 1, locale = "en_US"),
+    is_weekend = if_else(weekday %in% c("Sat", "Sun"), 1, 0),
+    total_active_minutes = VeryActiveMinutes + FairlyActiveMinutes + LightlyActiveMinutes,
+    
+    steps_per_active_min = if_else(total_active_minutes > 0, TotalSteps / total_active_minutes, 0),
+    cal_por_min = if_else(total_active_minutes > 0, Calories / total_active_minutes, 0),
+    dist_por_min = if_else(total_active_minutes > 0, TotalDistance / total_active_minutes, 0),
+    
+    cal_por_paso = Calories / TotalSteps
+  )
+```
+### 4.3.Ajuste de Coherencia Temporal
+
+Un día calendario tiene un límite estricto de 1440 minutos. Debido a la agregación previa de registros duplicados, algunos casos excedían este límite en la variable SedentaryMinutes. Corregimos estos valores para asegurar que la suma de minutos activos y sedentarios sea lógicamente posible.
+
+```{r}
+tabla_filtrada <- tabla_filtrada %>%
+  mutate(
+    SedentaryMinutes = ifelse(
+      total_active_minutes + SedentaryMinutes > 1440,
+      1440 - total_active_minutes,
+      SedentaryMinutes
+    )
+  )
+```
+## 5.Validación de Datos e Identificación de Anomalías
+
+En esta fase, auditamos la integridad física y fisiológica de los datos para asegurar que los hallazgos no estén sesgados por errores técnicos del dispositivo o mal uso.
+
+### 5.1.Consistencia Fisiológica (Pasos vs. Distancia)
+
+Analizamos la relación entre los pasos y la distancia recorrida. El rango esperado para un adulto promedio oscila entre **600 y 2,500 pasos por kilómetro.**
+
+**Resultado:** No se detectaron anomalías; todos los registros se encuentran dentro de los parámetros de locomoción humana estándar.
+
+```{r}
+outlier_registro <- tabla_filtrada %>%
+  mutate(pasos_por_km = TotalSteps / (TotalDistance * 1.60934)) %>%
+  filter(pasos_por_km < 600 | pasos_por_km > 2500)
+
+```
+
+<details>
+
+  <summary>🔍Clic aquí para ver el resultado</summary>
+  
+```{r}
+outlier_registro
+
+``` 
+</details>
+
+
+### 5.2 Integridad de Métricas de Intensidad
+
+Se verificó si la TotalDistance coincidía con la suma de las distancias por nivel de intensidad.
+
+**Hallazgo:** Se detectaron variaciones mínimas (menores a 0.01 km), probablemente atribuidas a errores de redondeo en los algoritmos internos de Fitbit. Dado que la diferencia es insignificante, se mantiene la distancia total como fuente oficial.
+
+```{r}
+tabla_filtrada %>%
+  mutate(
+    suma_distancias = VeryActiveDistance +
+      ModeratelyActiveDistance +
+      LightActiveDistance,
+    
+    diferencia = TotalDistance - suma_distancias
+  ) %>%
+  filter(abs(diferencia) > 0.01) %>%
+  select(Id, ActivityDate, TotalDistance, suma_distancias, diferencia)%>%
+  head(5) 
+```
+
+### 5.3 Validación del Límite Temporal (1,440 min)
+
+Confirmamos que ningún usuario registre más de 24 horas de actividad/inactividad combinada en un solo día.
+
+**Resultado:** Gracias a la corrección realizada en el paso 4.3, el 100% de los datos cumplen ahora con la restricción lógica de 1,440 minutos diarios.
+
+```{r}
+minutos_excesivos <- tabla_filtrada %>%
+  mutate(
+    min_totales = total_active_minutes + SedentaryMinutes
+  ) %>%
+  filter(min_totales > 1440)
+
+```
+<details>
+
+  <summary>🔍Clic aquí para ver el resultado</summary>
+```{r}
+minutos_excesivos
+```
+</details> 
+
+
+### 5.4.Análisis de Casos Atípicos (Atletas y Récords)
+
+Se analizó si existían usuarios con mas de 30000 pasos diarios y se detectó una usaria con un registro de **36019 pasos diarios**
+
+```{r}
+tabla_filtrada %>%
+filter(TotalSteps > 30000) %>%
+  mutate(pasos_por_km = TotalSteps / (TotalDistance * 1.60934)) %>%
+  select(Id, ActivityDate, TotalSteps, TotalDistance, pasos_por_km, Calories, total_active_minutes)
+```
+
+### 5.5.Perfil del Usuario "Récord"
+
+Después de revisar los patrones de actividad del usuario y la relación pasos-distancia, esta observación se identificó como inconsistente con el resto del conjunto de datos.
+
+```{r}
+usuario_record_id <- 1624580081 
+
+tabla_filtrada %>%
+  filter(Id == usuario_record_id) %>%
+  summarise(
+    `Días de registro` = n(),
+    `Pasos promedio` = mean(TotalSteps),
+    `Pasos máximos` = max(TotalSteps),
+    `Minutos de Act. promedio` = mean(total_active_minutes)
+  ) %>%
+  kable(
+    digits = 1, 
+    align = "cccc", # Cuatro 'c' porque ahora tenemos 4 columnas
+    caption = paste("Análisis de Comportamiento del Usuario:", usuario_record_id)
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = F,
+    position = "center"
+  ) %>%
+  row_spec(0, bold = T, color = "white", background = "#6b4c71")
+```
+
+
+### 5.6.Análisis de pasos por minuto activo demasiado bajos o altos
+
+Para identificar registros donde el dispositivo pudo haber estado estático pero contando pasos (vibraciones externas) o activo sin contar pasos, filtramos cadencias fuera del rango de **10 a 200 pasos/min**.
+
+**Resultado:** Se identificaron 18 registros con valores inverosímiles que serán descartados para no sesgar las medias de intensidad.
+
+```{r}
+# Definimos como límite inferior menos de 10 pasos por minuto activo y límite superior más de 200 pasos por minuto activo
+
+outlier_steps_min <- tabla_filtrada %>%
+  filter(steps_per_active_min < 10 | steps_per_active_min > 200)
+
+
+```
+
+<details>
+
+  <summary>🔍Clic aquí para ver el resultado</summary>
+  
+```{r}
+outlier_steps_min %>%
+kbl() %>%
+kable_minimal()
+```
+<details> 
+
+
+### 5.7.Validación de Velocidad Física (Millas por Minuto)
+
+Dado que el dataset utiliza millas, establecimos un umbral de seguridad entre 0.01 y 0.2 millas/min
+
+* El límite superior equivale a **12 mph** (un ritmo de carrera profesional).
+* El límite inferior equivale a **0.6 mph** (un ritmo de caminata extremadamente lenta).
+
+Cualquier valor fuera de este rango sugiere errores de GPS o fallos de sensor. Detectamos **26 registros** anómalos.
+
+
+```{r}
+# Definimos los umbrales en millas/minuto
+# 0.2 millas/min = 12 mph (Ritmo de carrera intenso)
+# 0.01 millas/min = 0.6 mph (Ritmo de caminata mínima)
+
+outlier_dist_min <- tabla_filtrada %>%
+  filter(total_active_minutes > 0) %>%
+  mutate(ratio_distancia_min = TotalDistance / total_active_minutes) %>%
+  filter(ratio_distancia_min < 0.01 | ratio_distancia_min > 0.2)
+
+```
+
+<details>
+
+  <summary>🔍Clic aquí para ver el resultado</summary>
+  
+```{r}
+outlier_dist_min %>%
+kbl() %>%
+kable_minimal()
+```
+<details>  
+
+### 5.8 Filtro global de registros anómalos
+
+Se buscaron registros con datos incosistentes como aquellos que la correlación entre pasos y calorías consumidas era muy chica (<0.20), calorías consumidas eran mayor a 3500Kcal, poca variabilidad calórica y el consumo de calorías consumidas por paso era mayor a 0.9. De esta auditoría de coherencia metabólica, se detectaron **3 usuarios** con una tasa de **gasto calórico por paso superior a 1.0**, lo cual es biológicamente inconsistente con la actividad humana normal y sugiere errores de calibración del dispositivo,estos usuarios serán excluidos. También se detectó una usuaria con alto gasto calórico pero esta usuaria será conservada debido a sus fuertes coeficientes de correlación (r>0.70).
+
+**Resultados:** Se detectaron **4 usuarios** con datos incosistentes.
+
+```{r}
+usuarios_corruptos <- tabla_filtrada%>%
+  group_by(Id) %>%
+  summarise(
+    cor_pas_cal = cor(TotalSteps, Calories),
+    cal_prom = mean(Calories),
+    sd_cal = sd(Calories),
+    mean_cal_paso = mean(Calories / TotalSteps)
+  ) %>%
+  filter(
+    cor_pas_cal < 0.20 |               # Correlación casi inexistente
+      cal_prom > 3500   |               # Promedio físico improbable para el target
+      sd_cal < 100     |                 # Muy poca variabilidad (parece un bot o datos estáticos)
+      mean_cal_paso > 0.9                 # Demasiadas calorías para tan pocos pasos
+  )
+
+n_distinct(usuarios_corruptos$Id)
+```
+
+<details>
+
+  <summary>🔍Clic aquí para ver el resultado</summary>
+```{r}
+usuarios_corruptos %>%
+kbl() %>%
+kable_minimal()
+
+```
+
+</details>  
+
+
+### 5.9 Eliminación de registros anómalos
+
+Finalmente, consolidamos todos los criterios anteriores para obtener la tabla_limpia. Hemos eliminado los usuarios con fallas metabólicas, los registros de velocidad imposible y el evento único del usuario récord que distorsionaba la escala.
+
+```{r}
+# Identificamos IDs finales a eliminar
+usuarios_a_eliminar <- tabla_filtrada %>%
+  group_by(Id) %>%
+  summarise(
+    ratio_cal_paso = mean(ifelse(TotalSteps == 0, NA, Calories / TotalSteps), na.rm = TRUE),
+    correlacion = cor(TotalSteps, Calories, use = "complete.obs")
+  ) %>%
+  filter(
+    ratio_cal_paso > 1.0 |  
+      correlacion < 0.20       # Usuarios donde los pasos y calorías no tienen sentido entre sí
+  )
+```
+
+
+
+```{r}
+# Aplicación de limpieza total
+tabla_limpia <- tabla_filtrada %>%
+  filter(
+    # 1. Filtros de intensidad y velocidad
+    
+    steps_per_active_min >= 10 & steps_per_active_min <= 200,
+    (TotalDistance / total_active_minutes) >= 0.01 & (TotalDistance / total_active_minutes) <= 0.2,
+    
+    # 2. Eliminación de usuarios donde no corresponde el consumo caloríco
+    
+    !Id %in% usuarios_a_eliminar$Id,
+    
+    # 3. Registro con mas de 36000 pasos
+    
+    !(Id == 1624580081 & ActivityDate == as.Date("2016-05-01"))
+  )
+```
+
+### 5.10 Validación de Consistencia Post-Limpieza
+
+Tras aplicar los filtros de integridad metabólica y física, es necesario re-evaluar si las usuarias aún cumplen con el criterio de continuidad (mínimo de 20 días registrados). Este paso es vital para evitar que perfiles con pocos datos válidos distorsionen las tendencias grupales.
+
+```{r}
+n_distinct(tabla_limpia$Id)
+
+tabla_limpia %>%
+  count(Id) %>%
+  arrange(n)
+```
+
+### 5.11  Ajuste Final de la Muestra
+
+Identificamos que una usuaria que perdió registros críticos durante la depuración. Para mantener la robustez del análisis, realizamos una última filtración por ID.
+
+```{r}
+# Identificamos usuarias que mantienen el umbral de 20 días
+usuarios_finales <- tabla_limpia %>%
+  count(Id, name = "dias_validos") %>%
+  filter(dias_validos >= 20) %>%
+  pull(Id)
+
+# Aplicamos el filtro definitivo
+tabla_limpia <- tabla_limpia %>%
+  filter(Id %in% usuarios_finales)
+
+
+```
+
+### 5.12 Estado Final del Dataset
+
+La auditoría de datos concluye con un dataset optimizado. Hemos pasado de una masa de datos crudos a un conjunto de **1,073 registros** pertenecientes a **29 usuarias** con alta consistencia de uso
+
+```{r}
+
+#Resumen final de la muestra
+
+resumen_final <- tabla_limpia %>%
+  count(Id, name = "Dias_Validos") %>%
+  summarise(
+    Total_Usuarias = n(),
+    Total_Registros = sum(Dias_Validos),
+    Promedio_Dias_por_Usuaria = mean(Dias_Validos)
+  )
+
+resumen_final %>%
+  kbl(caption = "Estadísticas Finales del Dataset Limpio") %>%
+  kable_minimal()
+```
+
+## 6. Análisis exploratorio
+
+### 6.1 Perfil de Actividad por Usuario
+
+Al observar los registros individuales, detectamos una marcada disparidad en los hábitos. Mientras que algunas usuarias promedian más de 16,000 pasos diarios, otras apenas alcanzan los 4,700. Esta variabilidad también se refleja en el comportamiento sedentario, con diferencias que llegan a duplicar el tiempo de inactividad entre usuarias.
+
+```{r}
+usuarios_promedio <- tabla_limpia %>%
+  group_by(Id) %>%
+  summarise(
+    pasos_promedio = mean(TotalSteps, na.rm = TRUE),
+  minutos_activos_promedio = mean(total_active_minutes, na.rm = TRUE),
+  sedentarismo_promedio = mean(SedentaryMinutes, na.rm = TRUE),
+  calorias_promedio = mean(Calories, na.rm = TRUE),
+  .groups = "drop"
+  )
+
+```
+
+</details>
+
+  <summary>🔍Clic aquí para ver el resultado</summary>
+  
+```{r}
+usuarios_promedio %>%
+kbl() %>%
+kable_minimal()
+```
+  
+</details>  
+
+### 6.2 Estadísticas Descriptivas Generales
+
+La Desviación Estándar de aproximadamente 4,600 pasos confirma una gran heterogeneidad. Esto nos indica que las recomendaciones de "talla única" no son efectivas para Bellabeat; la clave del éxito reside en la personalización.
+
+
+```{r}
+# Creamos el resumen de datos.
+
+resumen_estadistico <- tabla_limpia %>% 
+  summarise(
+    `Promedio de Pasos` = mean(TotalSteps),
+    `Mediana de Pasos` = median(TotalSteps),
+    `Desviación Estándar` = sd(TotalSteps),
+    `Mínimo` = min(TotalSteps),
+    `Máximo` = max(TotalSteps),
+    `Minutos Sedentarios` = mean(SedentaryMinutes),
+    `Calorías Promedio` = mean(Calories)
+  ) %>%
+  # Transponemos para que sea una lista vertical (más legible)
+  
+  pivot_longer(cols = everything(), names_to = "Métrica", values_to = "Valor")
+
+# Generamos la tabla
+
+resumen_estadistico %>%
+  kable(
+    digits = 1,
+    caption = "Análisis de Tendencia Central y Dispersión",
+    align = "lr"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width = F,
+    position = "center"
+  ) %>%
+  column_spec(1, bold = T, border_right = T) %>%
+  row_spec(0, background = "#6b4c71", color = "white")
+```
+
+### 6.3 Segmentación: ¿Hábito o Esfuerzo Esporádico?
+  
+Aunque el 31% de las usuarias clasifican como 'Élite', el análisis revela un dato crítico: alcanzar la meta de 10,000 pasos suele ser un evento esporádico. Solo en 1 de cada 3 días se logra este objetivo
+
+**Insight de Producto:** Existe una gran oportunidad para Bellabeat de trabajar en la **retención del hábito** y la consistencia diaria, más que en el volumen de actividad puntual.
+
+```{r}
+segmentacion_pasos <- tabla_limpia %>%
+  group_by(Id) %>%
+  summarise(promedio = mean(TotalSteps), .groups = "drop") %>%
+  mutate(categoria = case_when(
+    promedio >= 10000 ~ "Meta cumplida (Elite)",
+    promedio >= 7500 ~ "Casi en la meta (Oportunidad)",
+    TRUE ~ "Necesita motivación (Sedentario/Ligero)"
+  )) %>%
+  count(categoria) %>%
+  mutate(pct = n / sum(n) * 100)
+
+```
+
+```{r}
+colores_fijos <- c(
+  "Necesita motivación (Sedentario/Ligero)" = "#7D5A83", # Púrpura oscuro
+  "Casi en la meta (Oportunidad)" = "#C5A7BC",           # Púrpura medio
+  "Meta cumplida (Elite)" = "#FADADD"                    # Rosa clarito
+)
+
+ggplot(segmentacion_pasos, aes(x = reorder(categoria, -pct), y = pct, fill = categoria)) +
+  geom_bar(stat = "identity", show.legend = TRUE) +
+  geom_text(aes(label = paste0(round(pct, 1), "%")), 
+            vjust = -0.5, 
+            size = 5, 
+            fontface = "bold") +
+  # Usamos el mapeo directo de colores
+  scale_fill_manual(
+    values = colores_fijos,
+    name = "Referencia de Pasos:",
+    labels = c(
+      "Necesita motivación (Sedentario/Ligero)" = "Necesita motivación: < 7.500",
+      "Casi en la meta (Oportunidad)" = "Casi en la meta: 7.500 - 9.999",
+      "Meta cumplida (Elite)" = "Meta cumplida: ≥ 10.000"
+    )
+  ) +
+  labs(
+    title = "Distribución de Usuarias según Nivel de Actividad",
+    subtitle = "Análisis segmentado por volumen de pasos diarios",
+    x = "Categoría de Usuario",
+    y = "Porcentaje (%)",
+    caption = "Nota: Rangos definidos según estándares de salud cardiovascular."
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    legend.position = "right"
+  )
+  
+```
+
+
+## 7. Métricas Globales de Cumplimiento
+
+### 7.1 El Desafío de la Consistencia (Meta 10k)
+
+A pesar de que los promedios generales pueden parecer positivos, la meta de 10,000 pasos —estándar internacional de salud cardiovascular— presenta una tasa de cumplimiento de apenas el 39.5%. Esto significa que en el 60.5% de los días analizados, las usuarias quedan por debajo del objetivo recomendado, evidenciando una brecha crítica en la formación de hábitos sólidos.
+
+```{r}
+tabla_limpia %>% 
+  mutate(meta_10k = TotalSteps >= 10000) %>% 
+  summarise(
+    `Total de Registros (Días)` = n(),
+    `Días con Meta Cumplida` = sum(meta_10k),
+    `Porcentaje de Éxito (%)` = (sum(meta_10k) / n()) * 100
+  ) %>%
+  kable(
+    digits = 1, 
+    align = "ccc", # Centrado
+    caption = "Análisis de Cumplimiento de la Meta de 10,000 Pasos"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover", "condensed"),
+    full_width = F,
+    position = "center"
+  ) %>%
+  row_spec(0, bold = T, color = "white", background = "#6b4c71") %>% 
+  column_spec(3, bold = T, color = "#6b4c71") 
+```
+
+### 7.2 Distribución Individual del Éxito
+
+Al desagregar este porcentaje por usuario, observamos la verdadera naturaleza del comportamiento. El histograma revela que la mayoría de las usuarias cumple la meta en menos de la mitad de sus días registrados.
+
+Insight Clave: Solo un pequeño grupo de "usuarias élite" supera el 75% de cumplimiento. Para la gran mayoría, la actividad física es intermitente. Esto posiciona a Bellabeat no solo como un monitor de actividad, sino como una herramienta necesaria de comportamiento y motivación diaria.
+
+```{r}
+pct_meta_usuario <- tabla_limpia %>%
+  mutate(meta_10k = TotalSteps >= 10000) %>%
+  group_by(Id) %>%
+  summarise(
+    pct_dias_meta = mean(meta_10k) * 100
+  )
+
+```
+
+<details>
+
+  <summary>🔍Clic aquí para ver el resultado</summary>
+  
+```{r}
+pct_meta_usuario %>%
+kbl() %>%
+kable_minimal()
+
+```
+
+</details>  
+
+
+```{r}
+promedio_meta <- mean(pct_meta_usuario$pct_dias_meta)
+
+ggplot(pct_meta_usuario, aes(x = pct_dias_meta)) +
+  geom_histogram(binwidth = 10, fill = "#7D5A83", color = "white") +
+  geom_vline(xintercept = 50, linetype = "dashed", color = "red")+
+ geom_vline( xintercept = promedio_meta, linetype = "dashed", color = "darkgray", size = 1) +
+  geom_vline(xintercept = 75, linetype = "dashed", color = "blue")+
+  annotate("text", x = 42, y = 4.5, label = "Promedio: 39.5%", angle = 90, color = "darkgray")+
+  labs(
+    title = "Distribución del Cumplimiento de la Meta de 10.000 Pasos",
+    subtitle = "Porcentaje de días en que cada usuario alcanza la meta",
+    x = "% de días con 10k pasos",
+    y = "Cantidad de usuarios",
+    caption = "Fuente: Análisis de datos FitBit / Proyecto Bellabeat"
+  ) +
+  theme_minimal()+
+  theme(plot.title = element_text(face = "bold", size = 14))
+
+```
+
+## 8. Distribución de la Actividad por Día de la Semana
+
+El análisis de la variabilidad diaria nos permite entender no solo cuánto se mueven las usuarias, sino cómo cambian sus rutinas a lo largo de la semana.
+
+**Hallazgos por Jornada:**
+
+* **Estructura Semanal:** Durante los días laborales la actividad presenta una dispersión más controlada, lo que sugiere que las usuarias siguen rutinas más estructuradas
+
+* **El Efecto Sábado:** Es el día con mayor variabilidad y donde se registran los valores máximos de actividad. Esto identifica un segmento de usuarias que concentran su esfuerzo físico intenso durante el fin de semana
+
+* **Transición y Descanso del Domingo:** Presenta la mediana más baja de la semana, reflejando un comportamiento natural hacia la recuperación y el ocio sedentario antes de reiniciar el ciclo.
+
+
+
+```{r}
+tabla_limpia <- tabla_limpia %>%
+  mutate(weekday = recode(weekday, 
+                          "Mon" = "Lunes", 
+                          "Tue" = "Martes", 
+                          "Wed" = "Miércoles", 
+                          "Thu" = "Jueves", 
+                          "Fri" = "Viernes", 
+                          "Sat" = "Sábado", 
+                          "Sun" = "Domingo"),
+         weekday = factor(weekday, levels = c("Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo")))
+
+pasos_por_dia <- tabla_limpia %>%
+  group_by(weekday) %>%
+  summarise(pasos_medios = mean(TotalSteps))
+
+promedio_pasos <- mean(tabla_limpia$TotalSteps)
+
+colores_bellabeat <- c("#7D5A83", "#9B76A0", "#B08EAD", "#C5A7BC", "#D8C0CB", "#EBCFD4", "#FADADD")
+
+ggplot(tabla_limpia, aes(x = weekday, y = TotalSteps, fill = weekday)) +
+  geom_boxplot(alpha = 0.7, outlier.color = "#E74C3C", outlier.shape = 1) +
+  stat_summary(fun = mean, geom = "point", shape = 18, size = 3, color = "black") +
+  geom_hline(yintercept = promedio_pasos, linetype = "dashed", color = "#8B0000", linewidth = 0.8) +
+  annotate(
+    "text",
+    x = 1.1, 
+    y = 8000,
+    label = "Promedio: 8,900",
+    color = "#8B0000",
+    hjust = 0,
+    fontface = "italic",
+    size = 3.5
+  ) + 
+  scale_fill_manual(values = colores_bellabeat) + 
+  labs(
+    title = "Variabilidad de la Actividad Diaria",
+    subtitle = "Distribución de pasos por día de la semana",
+    x = "Día de la Semana",
+    y = "Número de Pasos",
+    caption = "Fuente: Análisis de datos FitBit / Proyecto Bellabeat"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", size = 14, color = "#2C3E50"),
+    plot.subtitle = element_text(size = 11, color = "#566573"),
+    panel.grid.minor = element_blank(),
+    plot.caption = element_text(face = "italic", size = 8, color = "grey40")
+  )+
+  annotate(
+    "text", 
+    x = "Sábado", 
+    y = 32500,    
+    label = "Pico de actividad semanal", 
+    color = "#7D5A83", 
+    fontface = "bold", 
+    size = 4
+  ) +
+  annotate(
+    "curve", 
+    x = "Sábado", xend = "Sábado", 
+    y = 31000, yend = 29000, 
+    curvature = 0.2, 
+    arrow = arrow(length = unit(0.2, "cm")),
+    color = "#7D5A83"
+  )
+
+```
+
+## 9.Actividad Física vs. Tiempo Sedentario: La Paradoja de la Usuaria Activa
+
+Este análisis revela una realidad crítica sobre el comportamiento de las usuarias: el ejercicio intenso no es el opuesto directo del sedentarismo; ambos coexisten en el mismo día.
+
+### 9.1. Distribución del Tiempo en un Día Promedio
+
+Los datos son contundentes: el 78.4% del tiempo monitoreado corresponde a un estado sedentario.
+
+**El hallazgo:** Incluso en usuarias con altos niveles de pasos, el sedentarismo domina la mayor parte de la jornada. Esto sugiere que gran parte de la jornada transcurre en contextos sedentarios (probablemente laborales o de transporte), mientras que la actividad física se concentra en momentos específicos del día..
+
+```{r}
+data_proporcion <- tabla_limpia %>%
+  group_by(ActivityDate) %>%
+  summarise(
+    Muy_Activo = mean(VeryActiveMinutes),
+    Moderado = mean(FairlyActiveMinutes),
+    Ligero = mean(LightlyActiveMinutes),
+    Sedentario = mean(SedentaryMinutes),
+    .groups = "drop"
+  ) %>%
+  summarise(across(-ActivityDate, mean)) %>%
+  pivot_longer(cols = everything(), names_to = "Nivel", values_to = "Minutos") %>%
+  mutate(Porcentaje = Minutos / sum(Minutos) * 100)
+
+ggplot(data_proporcion, aes(x = reorder(Nivel, Porcentaje), y = Porcentaje, fill = Nivel)) +
+  geom_col() +
+  coord_flip() +
+  expand_limits(y = 85) +
+  scale_fill_manual(values = c("#FADADD", "#D8C0CB", "#B08EAD", "#7D5A83")) +
+  geom_text(aes(label = paste0(round(Porcentaje,1), "%")),
+            hjust = -0.2) +
+  labs(
+    title = "Distribución del Tiempo en un Día Promedio",
+    subtitle = "Proporción de minutos según nivel de actividad",
+    x = "",
+    y = "Porcentaje del día (%)",
+    caption = "Fuente: Análisis de datos FitBit / Proyecto Bellabeat"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none", plot.title = element_text(face = "bold"))
+
+```
+
+### 9.2. Correlación: Pasos vs. Minutos Sentada
+
+Al graficar la relación entre los pasos totales y el sedentarismo, encontramos una correlación negativa débil (r=−0.17).
+
+**Interpretación:** La pendiente levemente descendente confirma que aumentar los pasos diarios no garantiza una reducción drástica del tiempo sentado.
+
+**Oportunidad para Bellabeat:** Muchas usuarias creen que por cumplir una meta de pasos han dejado de ser "sedentarias". Bellabeat puede diferenciarse educando sobre el concepto de "Sedentaria Activa" y enviando alertas para romper los ciclos de inactividad prolongada cada hora, independientemente de la meta de pasos diaria.
+
+```{r}
+correlacion <- cor(tabla_limpia$TotalSteps, tabla_limpia$SedentaryMinutes)
+
+ggplot(tabla_limpia, aes(x = TotalSteps, y = SedentaryMinutes)) +
+  geom_point(color = "#A883A3", alpha = 0.6) + 
+  geom_smooth(method = "lm", color = "#7D5A83", se = TRUE) + # Línea de tendencia
+  annotate("label", x = 25000, y = 1400, 
+           label = paste("Correlación =", round(correlacion, 2)), 
+           fontface = "bold", color = "#7D5A83", size = 5) +
+  labs(
+    title = "Relación entre Actividad Física y Sedentarismo",
+    subtitle = "¿Caminar más reduce significativamente el tiempo sentado?",
+    x = "Pasos Totales por Día",
+    y = "Minutos Sedentarios por Día",
+    caption = "Nota: La pendiente leve indica una relación débil."
+  ) +
+  theme_minimal()
+
+```
+
+
+## 10.Relación entre Actividad Física y Gasto Calórico
+
+En este bloque analizamos la eficiencia del movimiento. Si bien la lógica indica que a mayor ejercicio, mayor gasto calórico, los datos revelan matices importantes.
+
+### 10.1. El Factor Metabólico
+
+**Insight de Salud:** El gasto calórico no depende únicamente de la duración de la actividad. Factores individuales como peso corporal, metabolismo basal y eficiencia del movimiento pueden generar variaciones entre usuarias con niveles similares de actividad.
+
+**Oportunidad Estratégica:** Bellabeat tiene una oportunidad de oro para diferenciarse de la competencia ofreciendo recomendaciones basadas en el perfil metabólico único de cada mujer, integrando datos de salud hormonal o composición corporal, y no solo basándose en un conteo genérico de minutos.
+
+```{r}
+cor_cal <- cor(tabla_limpia$total_active_minutes, tabla_limpia$Calories)
+
+ggplot(tabla_limpia, aes(x = total_active_minutes, y = Calories)) +
+  geom_point(alpha = 0.4, color = "#7D5A83", size = 2.5) +
+  geom_smooth(method = "lm", color = "#D81B60", size=1.2) +
+  annotate("label",
+           x = max(tabla_limpia$total_active_minutes)*0.7,
+           y = max(tabla_limpia$Calories)*0.9,
+           label = paste("Correlación = ", round(cor_cal, 2)),
+           size = 5,
+           fontface = "bold",
+           fill = "white",
+           color = "#D81B60") +
+  labs(
+    title = "Actividad Física y Gasto Calórico",
+    subtitle = "Los usuarios con más minutos activos tienden a quemar más calorías",
+    x = "Minutos Activos Totales",
+    y = "Calorías Quemadas",
+    caption = "Fuente: Análisis de datos FitBit / Proyecto Bellabeat"
+  ) +
+  theme_light()+
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    panel.grid.minor = element_blank()
+  )
+
+
+```
+
+
+## 11. Sedentarismo vs. Calidad del Sueño: ¿Existe una relación?
+
+En este bloque, cruzamos los datos de actividad diaria con los registros de sueño para investigar si un estilo de vida sedentario impacta directamente en la capacidad de descanso de las usuarias.
+
+### 11.1. Preparación de Métricas de Descanso
+
+Para un análisis preciso, no solo consideramos las horas totales dormidas, sino que creamos dos métricas de calidad:
+
+**Tiempo Despierto en Cama:** La brecha entre el tiempo total en cama y el sueño real (indicador de insomnio o inquietud).
+
+**Eficiencia del Sueño:** El porcentaje del tiempo en cama que realmente se pasó durmiendo.
+
+```{r}
+# Carga de archivo
+
+sleep_raw <- read_csv("sleepDay_merged.csv", show_col_types = FALSE)
+
+# Limpieza y creaciCón de métricas de eficiencia
+
+sleep_clean <- sleep_raw %>%
+  distinct() %>% # Fundamental: elimino duplicados
+  
+  mutate(ActivityDate = as_date(mdy_hms(SleepDay))) %>% 
+  rename(
+    MinutosDormidos = TotalMinutesAsleep, 
+    MinutosEnCama = TotalTimeInBed
+  ) %>%
+  mutate(
+    TiempoDespiertoEnCama = MinutosEnCama - MinutosDormidos,
+    EficienciaSueno = (MinutosDormidos / MinutosEnCama) * 100
+  ) %>%
+  select(Id, ActivityDate, MinutosDormidos, MinutosEnCama, TiempoDespiertoEnCama, EficienciaSueno)
+
+# Unimos con tabla de actividad
+
+df_final_unificado <- tabla_limpia %>%
+  left_join(sleep_clean, by = c("Id", "ActivityDate")) %>%
+  drop_na(MinutosDormidos) # Solo analizamos los días que tienen ambos registros
+
+```
+
+### 11.2. Hallazgos: La Independencia del Descanso
+
+Contrario a la creencia popular de que "estar cansada por el movimiento ayuda a dormir mejor", los datos muestran una correlación débil (r≈-0.15) entre los minutos sedentarios y la inquietud nocturna.
+
+**Interpretación:** La calidad del sueño parece ser un fenómeno multifactorial (estrés, cafeína, higiene del sueño) que no se explica únicamente por el nivel de sedentarismo o actividad física del día.
+
+**Recomendación para Bellabeat:** En lugar de solo sugerir ejercicio para dormir mejor, el producto podría incorporar un "Diario de Sueño" o sensores de estrés (cortisol/HRV) para encontrar las verdaderas causas de la inquietud nocturna.
+
+
+```{r}
+cor_sueño <- cor(df_final_unificado$SedentaryMinutes, 
+                 df_final_unificado$TiempoDespiertoEnCama, 
+                 use = "complete.obs")
+
+
+ggplot(df_final_unificado, aes(x = SedentaryMinutes, y = TiempoDespiertoEnCama)) + 
+  geom_point(aes(color = EficienciaSueno), size = 3, alpha = 0.6) + 
+  geom_smooth(method = "lm", color = "#7D5A83", linetype = "dashed", se = FALSE) + 
+  scale_color_gradient(low = "#FADADD", high = "#7D5A83", name = "Eficiencia (%)") +
+  labs( 
+    title = "Sedentarismo vs. Inquietud Nocturna",
+    subtitle = "La baja correlación sugiere que el descanso depende de otros factores",
+    x = "Minutos Sedentarios al Día", 
+    y = "Minutos Despierta en Cama",
+    caption = "r ≈ 0 indica que el sedentarismo no predice la inquietud nocturna." 
+  ) + 
+  annotate("label", 
+           x = max(df_final_unificado$SedentaryMinutes, na.rm=T) * 0.8, 
+           y = max(df_final_unificado$TiempoDespiertoEnCama, na.rm=T) * 0.9, 
+           label = paste("r =", round(cor_sueño, 3)), 
+           fill = "white", color = "#7D5A83", size = 5, fontface = "bold") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"))
+
+```
+
+
+## 12. Ritmo de Vida: Análisis de Intensidad Horaria
+
+Comprender cómo varía la actividad a lo largo del día permite identificar momentos estratégicos en los que Bellabeat puede intervenir con recordatorios o recomendaciones personalizadas.
+
+### 12.1. Hallazgos del Ciclo Diario
+
+**Pico Post-Laboral:** Se observa un aumento sostenido de la intensidad a partir de las 17:00 hs, alcanzando su máximo a las 19:00 hs. Esto confirma que el ejercicio es una actividad de descompresión tras la jornada laboral.
+
+**El "Valle" de la Tarde:** Entre las 15:00 y 16:00 hs existe una caída notable en la intensidad. Identificar este periodo es clave para combatir el sedentarismo acumulado.
+
+**Actividad de Mediodía:** Existe un segundo pico menor entre las 12:00 y 14:00 hs, probablemente asociado a caminatas durante el almuerzo o traslados.
+
+```{r}
+ruta_Intensidad <- "./datos"
+
+archivos_Intensidad <- list.files(
+  path = ruta_Intensidad,
+  pattern = "\\.csv$",
+  full.names = TRUE
+)
+
+# 1. Unimos las tablas de forma explícita
+tabla_Intensidad_Completa <- archivos_Intensidad %>%
+  map_df(function(x) read_csv(x, show_col_types = FALSE)) %>%
+  distinct()
+
+# 2. Transformamos los datos
+
+tabla_Intensidad_Completa <- tabla_Intensidad_Completa %>%
+  mutate(
+    ActivityHour = mdy_hms(ActivityHour),
+    Hora = hour(ActivityHour)
+  )
+
+# 3. Creamos el resumen
+
+resumen_horario <- tabla_Intensidad_Completa %>%
+  group_by(Hora) %>%
+  summarise(IntensidadPromedio = mean(AverageIntensity))
+
+# 4. Verificamos si se creó bien
+
+head(resumen_horario)%>%
+kbl() %>%
+kable_minimal()
+
+
+ggplot(resumen_horario, aes(x = Hora, y = IntensidadPromedio)) +
+  geom_col(aes(fill = IntensidadPromedio)) +
+  scale_fill_gradient(low = "#FADADD", high = "#7D5A83") + # Colores de tu paleta
+  scale_x_continuous(breaks = seq(0, 23, by = 2)) + # Etiquetas cada 2 horas para más limpieza
+  labs(
+    title = "Ritmo de Vida: Intensidad por Hora",
+    subtitle = "Identificación de picos de actividad y valles de sedentarismo",
+    x = "Hora del día",
+    y = "Intensidad Media",
+    fill = "Esfuerzo",
+    caption = "Fuente: Análisis consolidado FitBit / Proyecto Bellabeat"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    panel.grid.minor = element_blank(),
+    legend.position = "right"
+  )
+```
+
+## 13.Insights Estratégicos
+
+**Insight 1 — La inconsistencia es el principal desafío de actividad**
+
+Aunque el promedio general de pasos es relativamente positivo, solo el 39.5% de los días alcanza la meta de 10,000 pasos.
+
+Esto indica que el principal problema no es la falta total de actividad, sino la dificultad para mantener hábitos consistentes a lo largo del tiempo.
+
+La mayoría de las usuarias alterna días activos con días de baja actividad, lo que sugiere oportunidades para intervenciones orientadas a reforzar la continuidad del hábito.
+
+**Insight 2 — La actividad física se concentra fuera del horario laboral**
+
+El análisis horario revela un patrón claro de actividad post-laboral, con un aumento sostenido a partir de las 17:00 y un pico alrededor de las 19:00.
+
+Esto sugiere que muchas usuarias reservan el ejercicio como actividad posterior al trabajo, lo que posiciona a Bellabeat como un acompañante en el momento de transición entre la jornada laboral y el tiempo personal.
+
+
+**Insight 3 — El sedentarismo domina gran parte de la jornada**
+
+Incluso entre usuarias activas, el 78% del tiempo monitoreado corresponde a estados sedentarios.
+
+Esto evidencia que realizar ejercicio en momentos puntuales del día no necesariamente reduce el sedentarismo total, ya que gran parte del tiempo diario continúa siendo inactivo.
+
+Este fenómeno refuerza la necesidad de intervenciones que promuevan pausas activas durante el día, más allá del ejercicio estructurado.
+
+
+**Insight 3 — El sedentarismo domina gran parte de la jornada**
+
+Incluso entre usuarias activas, el 78% del tiempo monitoreado corresponde a estados sedentarios.
+
+Esto evidencia que realizar ejercicio en momentos puntuales del día no necesariamente reduce el sedentarismo total, ya que gran parte del tiempo diario continúa siendo inactivo.
+
+Este fenómeno refuerza la necesidad de intervenciones que promuevan pausas activas durante el día, más allá del ejercicio estructurado.
+
+
+**Insight 5 — La actividad semanal presenta patrones previsibles**
+
+El análisis por día de la semana muestra que:
+Los días laborales presentan patrones más consistentes
+El sábado concentra los picos máximos de actividad
+El domingo refleja un descenso asociado al descanso
+
+Este patrón sugiere que los comportamientos de actividad siguen rutinas sociales y laborales relativamente predecibles, lo que puede aprovecharse para diseñar estrategias de engagement específicas para cada momento de la semana.
+
+
+## 14. Recomendaciones Estratégicas para Bellabeat
+
+
+**1. Implementar recordatorios inteligentes para romper el sedentarismo**
+
+Dado que el sedentarismo ocupa la mayor parte del día, Bellabeat podría incorporar alertas personalizadas de movimiento durante periodos prolongados de inactividad.
+
+Estas intervenciones breves (por ejemplo, caminatas de 3-5 minutos cada hora) podrían ayudar a reducir el tiempo sedentario acumulado sin requerir sesiones de ejercicio estructuradas.
+
+**2. Aprovechar el pico post-laboral para impulsar el engagement**
+
+El análisis horario indica que muchas usuarias realizan actividad física después del trabajo.
+
+Bellabeat podría utilizar este patrón para enviar:
+
+* recordatorios de actividad
+
+* retos diarios
+
+* sugerencias de caminata entre las 17:00 y las 19:00, momento en el que la probabilidad de participación parece mayor
+
+**3. Fomentar la consistencia a través de metas semanales**
+
+Dado que la principal dificultad es mantener la regularidad, Bellabeat podría introducir métricas de consistencia, como:
+
+* rachas de actividad
+
+* objetivos semanales
+
+* recompensas por continuidad
+
+Este enfoque ayudaría a transformar la actividad física en un hábito sostenido y no en eventos aislados.
+
+**4. Expandir el monitoreo del sueño hacia factores de bienestar integral**
+
+Debido a que la calidad del sueño no depende únicamente de la actividad física, Bellabeat podría ampliar sus funcionalidades incorporando herramientas como:
+
+*registro de hábitos nocturnos
+
+*seguimiento del estrés
+
+*recomendaciones de higiene del sueño.
+
+Este enfoque permitiría ofrecer una visión más integral del bienestar, alineada con el posicionamiento de la marca.
